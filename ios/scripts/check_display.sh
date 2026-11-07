@@ -5,6 +5,11 @@ cd "$(dirname "$0")/../.."
 OUT="build/display-check"
 mkdir -p "$OUT"
 IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+IOS_SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
+SWIFT_SDK_CONDITION=HENGE_HAS_IOS27_SDK
+if [ "${IOS_SDK_VERSION%%.*}" -lt 27 ]; then
+  SWIFT_SDK_CONDITION=HENGE_LEGACY_SDK
+fi
 SOURCES=()
 while IFS= read -r source; do SOURCES+=("$source"); done < <(find ios/Henge -name '*.swift' -print | sort)
 SOURCES+=(ios/HengeJITHelper/HengeJITMessages.swift)
@@ -14,7 +19,7 @@ SOURCES+=(ios/HengeJITHelper/HengeJITMessages.swift)
 xcrun swiftc -emit-object -whole-module-optimization -swift-version 5 \
   -target arm64-apple-ios17.0 -sdk "$IOS_SDK" \
   -import-objc-header ios/Henge/HengeBridge.h -Ihost -Icore -Idevices \
-  "${SOURCES[@]}" -o "$OUT/Henge.o"
+  -D "$SWIFT_SDK_CONDITION" "${SOURCES[@]}" -o "$OUT/Henge.o"
 
 # Compile the renderer for both consumers. Suppress only warnings already present upstream.
 COMMON=(-std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations -Wno-shadow-ivar -fobjc-arc -Icore -Ihost -Idevices)

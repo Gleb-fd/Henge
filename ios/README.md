@@ -2,8 +2,8 @@
 
 The Henge app on HengeVM's engine. Build: `ios/scripts/package_ipa.sh` (writes
 `~/Desktop/Henge.ipa`; `--trollstore` writes `Henge.tipa`, for TrollStore and
-TrollStore Lite, without the entitlements TrollStore bans). Needs Xcode 27 or later, xcodegen,
-and the prebuilt pieces
+TrollStore Lite, without the entitlements TrollStore bans). This experimental
+branch accepts Xcode 26 or later, xcodegen, and the prebuilt pieces
 `ios/scripts/fetch_deps.sh` copies from Husk (StikJIT, the pairing library,
 libslirp and glib for iOS). `HENGE_ENTITLEMENTS` picks the app's entitlements file
 (default `Henge/Henge.entitlements`). A free personal team uses
@@ -30,8 +30,10 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
   [docs/architecture.md](../docs/architecture.md)).
 - **Display**: iOS has no ParavirtualizedGraphics framework, so Henge replays the
   guest's GPU commands with Metal (`devices/pvg_lite.c`, `devices/pvg_metal.m`).
-- **External display**: on iOS 27, `SessionView` registers a SwiftUI
-  `ExternalNonInteractiveAccessory` during a Mac session. On iOS 17–26 iOS offers
+- **External display**: when built with SDK 27, on iOS 27 `SessionView` registers a SwiftUI
+  `ExternalNonInteractiveAccessory` during a Mac session. SDK 26 builds omit
+  this accessory at compile time (`HENGE_LEGACY_SDK`); running those builds on
+  iOS 27 does not provide the accessory path. On iOS 17–26 iOS offers
   the display scene to the app delegate instead (`HengeAppDelegate`), and
   `LegacyExternalDisplay` shows the session there as `ExternalScreenPlan` decides;
   outside a session the display mirrors the phone. `DisplayRouter` selects

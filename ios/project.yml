@@ -16,6 +16,10 @@ settings:
     ONLY_ACTIVE_ARCH: YES
     ENABLE_BITCODE: NO
     SWIFT_VERSION: "5.0"
+    # Runtime availability checks cannot hide SDK 27 symbols from SDK 26.
+    HENGE_SDK_CONDITIONS: ""
+    "HENGE_SDK_CONDITIONS[sdk=iphoneos26*]": HENGE_LEGACY_SDK
+    "HENGE_SDK_CONDITIONS[sdk=iphonesimulator26*]": HENGE_LEGACY_SDK
     SWIFT_OPTIMIZATION_LEVEL: "-O"
     GCC_OPTIMIZATION_LEVEL: "2"
     CLANG_C_LANGUAGE_STANDARD: c11
@@ -50,6 +54,8 @@ targets:
         INFOPLIST_FILE: Henge/Info.plist
         CODE_SIGN_ENTITLEMENTS: $(HENGE_ENTITLEMENTS)
         SWIFT_OBJC_BRIDGING_HEADER: Henge/HengeBridge.h
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: >-
+          $(inherited) $(HENGE_SDK_CONDITIONS)
         TARGETED_DEVICE_FAMILY: "1,2"
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"

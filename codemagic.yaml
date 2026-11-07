@@ -13,8 +13,8 @@ workflows:
           xcodebuild -version
           version=$(xcodebuild -version | awk '/^Xcode / {print $2}')
           major=${version%%.*}
-          if [ "${major:-0}" -lt 27 ]; then
-            echo 'Henge needs Xcode 27+. Select a compatible build image.' >&2
+          if [ "${major:-0}" -lt 26 ]; then
+            echo 'Henge needs Xcode 26+. Select a compatible build image.' >&2
             exit 1
           fi
           xcrun --sdk iphoneos --show-sdk-version
@@ -24,6 +24,11 @@ workflows:
           cd "$CM_BUILD_DIR"
           mkdir -p ci-logs
           make test-a12-compat 2>&1 | tee ci-logs/a12-tests.log
+      - name: Compile app sources against the selected SDK
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          bash ios/scripts/check_display.sh 2>&1 | tee ci-logs/ios-sources.log
       - name: Build dependencies and ad-hoc IPA
         script: |
           set -euo pipefail

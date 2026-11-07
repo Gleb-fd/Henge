@@ -33,7 +33,11 @@ struct ExternalMacDisplayModifier: ViewModifier {
         let session = content
             .onAppear { LegacyExternalDisplay.shared.begin(presentation) }
             .onDisappear { LegacyExternalDisplay.shared.end(presentation) }
-        if #available(iOS 27.0, *) { // the compiler requires this to call the iOS 27 sceneAccessory API
+        #if HENGE_LEGACY_SDK
+        // SDK 26 has no sceneAccessory API, even inside #available.
+        session
+        #else
+        if #available(iOS 27.0, *) {
             session.sceneAccessory {
                 ExternalNonInteractiveAccessory {
                     ExternalMacDisplay(presentation: presentation)
@@ -42,5 +46,6 @@ struct ExternalMacDisplayModifier: ViewModifier {
         } else {
             session
         }
+        #endif
     }
 }
