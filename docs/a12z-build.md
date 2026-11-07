@@ -39,7 +39,12 @@ on the sideloader and account; this build alone does not guarantee JIT or device
 compatibility. Failed builds upload available build and dependency logs.
 
 The shared `ci/build-ios.sh` prepares the pinned Husk dependencies and builds
-pinned StikJIT from source before packaging. `ci/build-bitrise.sh` calls the
-same script and retains Bitrise's generic zip upload. The CI job requires
+pinned StikJIT from source before packaging. StikJIT uses binary Swift modules
+and an internal-distribution XCFramework: its module/enum name collision breaks
+textual Swift interfaces on the current toolchain. The script type-checks an
+import from the packaged framework before proceeding. Build the framework and
+Henge with the same Xcode; do not reuse this XCFramework across toolchains.
+`ci/build-bitrise.sh` calls the same script and retains Bitrise's generic zip
+upload. The CI job requires
 `make test-a12-compat` before building dependencies and packaging; it does not
 run the full Mac-only `make test`. A successful build is not a device test.
