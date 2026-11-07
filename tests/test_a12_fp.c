@@ -14,7 +14,7 @@ static HvCpu *cpu;
     "ldp q0, q1, [%4]\n\tldr q2, [%4, #32]\n\t.inst " #op "\n\t" \
     "str q0, [%5]\n\tmrs %2, fpsr\n\tmsr fpcr, %0\n\tmsr fpsr, %1" \
     : "=&r"(oldcr), "=&r"(oldsr), "=&r"(status) \
-    : "r"(cr), "r"(input), "r"(output) : "v0", "v1", "v2", "memory")
+    : "r"(cr), "r"(input), "r"(&output) : "v0", "v1", "v2", "memory")
 
 static void native_fhm_comparison(void) {
     int supported = 0;
