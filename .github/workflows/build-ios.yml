@@ -1,0 +1,54 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 180
+    env:
+      HUSK: ${{ github.workspace }}/../Husk
+      IOS_DEPS: ${{ github.workspace }}/../Husk/build/ios-arm64/sysroot
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check Xcode and iOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -version | grep -E '^Xcode 27([.]|$)'
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: A12 semantics and forced-fallback JIT tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          make test-a12-compat 2>&1 | tee ci-logs/a12-tests.log
+      - name: Build dependencies and IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ci/build-ios.sh 2>&1 | tee ci-logs/build.log
+      - name: Upload IPA
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Henge-adhoc-ipa
+          path: ~/Desktop/Henge.ipa
+          if-no-files-found: error
+      - name: Upload failure logs
+        if: failure()
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-build-failure-logs
+          path: |
+            ci-logs/
+            ios/build/*.buildlog
+            ../Husk/build/logs/
+          if-no-files-found: warn

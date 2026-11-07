@@ -9,6 +9,7 @@ the App Store.
 | Henge | GPL-2.0-or-later | `core/`, `devices/`, `host/`, `ios/`, `tools/` |
 | Code from Husk | GPL-2.0-or-later | `ios/Henge/JIT/`, `HengeLog.swift`, `Native/henge-ios-jit.*`, `henge-brk.S`, `HengeJITHelper/` |
 | QEMU's vmapple AES device, as a reference | GPL-2.0-or-later | `devices/aes.c` |
+| QEMU's SHA-512 transformations and half-to-single bit expansion, adapted | LGPL-2.1-or-later | `core/a12_compat.c`, `core/a12_fp.c` |
 | QEMU's `tcg-apple-jit.h` | LGPL-2.1-or-later | `ios/Henge/Native/` |
 | usbmuxd | GPL-2.0 or GPL-3.0 | `third_party/usbmuxd` |
 | idevicerestore | LGPL (see below) | `third_party/idevicerestore` |
@@ -25,6 +26,14 @@ the App Store.
 idevicerestore's `COPYING` file is LGPL-3.0, while its source headers say LGPL-2.1
 or later. If the `COPYING` file governs, the combined binary is GPL-3.0, which
 GPL-2.0-or-later allows.
+
+The A12 compatibility helpers adapt algorithms from QEMU's
+[`crypto_helper.c`](https://github.com/qemu/qemu/blob/71f25c75417d31c214ba2cd26b273c114fc99987/target/arm/tcg/crypto_helper.c)
+(Copyright 2013–2018 Linaro Ltd) and
+[`vec_helper.c`](https://github.com/qemu/qemu/blob/71f25c75417d31c214ba2cd26b273c114fc99987/target/arm/tcg/vec_helper.c)
+(Copyright 2018 Linaro). Both permit LGPL-2.1-or-later; their notices are retained
+in the helper sources. The LGPL-2.1 text is also included in
+[`third_party/libimobiledevice/COPYING.LESSER`](../third_party/libimobiledevice/COPYING.LESSER).
 
 ## Not covered
 

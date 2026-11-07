@@ -37,6 +37,8 @@ enum EngineTuning {
                 env[String(line[..<eq]).trimmingCharacters(in: .whitespaces)] = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
             }
         }
+        // Do not let a tuning file disable instruction fallbacks on an A12Z.
+        if Device.experimentalA12Z { env["HV_A12_COMPAT"] = "1" }
         for (k, v) in env.sorted(by: { $0.key < $1.key }) {
             setenv(k, v, 1)
             HengeLog.log("tuning", "\(k)=\(v)")

@@ -3,6 +3,7 @@ import SwiftUI
 /// Download macOS (or use a copy already on this device) and install it on a new Mac.
 struct InstallView: View {
     @ObservedObject private var installer = Installer.shared
+    @ObservedObject private var jit = JITCoordinator.shared
     @StateObject private var display = DisplayRouter()
     @State private var release = MacOSRelease.all.first(where: Installer.haveImage) ?? MacOSRelease.all[0]
     @State private var name = "Mac"
@@ -13,7 +14,7 @@ struct InstallView: View {
     @State private var stageStarted = Date()
     @State private var stageSeen = -1
     @State private var confirmDeleteDownload: MacOSRelease?
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.experimentalA12Z ? 2 : 4
 
     var body: some View {
         NavigationStack {
@@ -38,6 +39,15 @@ struct InstallView: View {
     // MARK: Choosing
 
     @ViewBuilder private var chooser: some View {
+        if Device.experimentalA12Z {
+            NoticeRow(symbol: "exclamationmark.triangle.fill", text: Device.experimentalA12ZText)
+                .padding(.bottom, 12)
+        }
+        if !JITBootstrap.ready {
+            Button("Turn On JIT") { jit.enable() }
+                .buttonStyle(DeskButtonStyle())
+                .padding(.bottom, 12)
+        }
         DeskHeading("Version")
         VStack(spacing: 0) {
             ForEach(MacOSRelease.all) { r in

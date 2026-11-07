@@ -4,7 +4,7 @@ CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices
 B = build
 
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
-       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o
+       $(B)/exception.o $(B)/sysreg.o $(B)/machine.o $(B)/a12_compat.o $(B)/a12_fp.o
 HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/cfg.o $(B)/bdif.o $(B)/pcie.o \
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o $(B)/virtio_usb.o $(B)/xhci.o $(B)/vmapple.o $(B)/aes.o $(B)/pl061.o
@@ -194,3 +194,22 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+# Standalone ISA semantics are portable; the forced-fallback JIT comparison needs Apple Silicon.
+$(B)/test_a12_compat: tests/test_a12_compat.c core/a12_compat.c core/a12_compat.h core/cpu.h | $(B)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Icore tests/test_a12_compat.c core/a12_compat.c -o $@
+
+$(B)/test_a12_fp: tests/test_a12_fp.c core/a12_fp.c core/a12_fp.h core/cpu.h | $(B)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Icore tests/test_a12_fp.c core/a12_fp.c -o $@
+
+$(B)/test_a12_jit: tests/test_a12_jit.c tests/a12_compat_programs.S tests/harness.S tests/harness.h $(ENGINE)
+	$(CC) $(CFLAGS) -Itests tests/test_a12_jit.c tests/a12_compat_programs.S tests/harness.S $(ENGINE) -o $@
+
+A12_TESTS = $(B)/test_a12_compat $(B)/test_a12_fp
+ifeq ($(shell uname -s)-$(shell uname -m),Darwin-arm64)
+A12_TESTS += $(B)/test_a12_jit
+endif
+
+test-a12-compat: $(A12_TESTS)
+	@for t in $(A12_TESTS); do echo "== $$t"; $$t || exit 1; done
+.PHONY: test-a12-compat

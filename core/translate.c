@@ -4,6 +4,8 @@
 #include <stdlib.h>
 
 #include "classify.h"
+#include "a12_compat.h"
+#include "a12_fp.h"
 #include "memop.h"
 #include "mmu.h"
 #include "operands.h"
@@ -1477,6 +1479,20 @@ static int translate_one(Emit *e, uint32_t insn, uint64_t pc) {
         put_helper(e, pc, insn, HV_OP_FPTRAP);
         return 1;
     }
+    if (e->m->a12_compat) {
+        if (hv_a12_compat_handles(insn) || hv_a12_fp_handles(insn)) {
+            put_helper(e, pc, insn, HV_OP_A12_COMPAT);
+            return 0;
+        }
+        if (insn == 0xd50330ffu) { /* SB: architectural fallback on pre-v8.5 hosts */
+            put(e, 0xd5033f9fu); /* DSB SY */
+            put(e, 0xd5033fdfu); /* ISB */
+            return 0;
+        }
+    } else if (insn == 0xd500401fu) { /* CFINV is not a PSTATE immediate write. */
+        put(e, insn);
+        return 0;
+    }
     switch (kind) {
     case HV_INSN_COPY:
         translate_copy(e, insn);
@@ -1746,6 +1762,7 @@ static void plan_groups(Emit *e, const uint32_t *code, uint32_t max, uint64_t va
         if (i > 0 && (va + 4ull * i == e->m->stop_pc || va + 4ull * i == e->m->stop_pc2)) break;
         HvInsnKind kind = hv_classify(insn);
         if ((e->flags & HV_BLOCK_FPOFF) && kind != HV_INSN_UNDEFINED && is_fp_insn(insn)) break;
+        if (e->m->a12_compat && (hv_a12_compat_handles(insn) || hv_a12_fp_handles(insn) || insn == 0xd50330ffu)) break;
         if (kind == HV_INSN_COPY && (insn & 0xfffff01fu) == 0xd503201fu) continue; /* hints (NOP, BTI): no register */
         if (kind == HV_INSN_COPY || kind == HV_INSN_PCREL || kind == HV_INSN_LOAD_LITERAL) {
             KILL(insn);

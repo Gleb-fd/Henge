@@ -68,6 +68,8 @@ struct HomeView: View {
     @ViewBuilder private var notices: some View {
         if Device.chipTooOld {
             NoticeRow(symbol: "exclamationmark.triangle.fill", text: Device.chipTooOldText, tint: Desk.bad)
+        } else if Device.experimentalA12Z {
+            NoticeRow(symbol: "exclamationmark.triangle.fill", text: Device.experimentalA12ZText)
         }
         if installer.busy {
             Button { tab = .install } label: {

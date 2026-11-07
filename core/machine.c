@@ -52,6 +52,10 @@ int hv_machine_init_jit(HvMachine *m, void *rx, void *rw, size_t jit_bytes) {
 }
 
 static int init_rest(HvMachine *m) {
+    const char *compat = getenv("HV_A12_COMPAT");
+    m->a12_compat = compat && strcmp(compat, "1") == 0;
+    if (m->a12_compat)
+        fprintf(stderr, "hengevm: experimental A12 instruction compatibility enabled\n");
     /* As many blocks as the region holds (a block is at least ~160 bytes of
        code), so the region filling, not this table, is what flushes; two
        chainable exits each at most. Untouched entries cost nothing. */

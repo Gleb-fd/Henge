@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 #include "exception.h"
+#include "a12_compat.h"
+#include "a12_fp.h"
 #include "memop.h"
 #include "mmu.h"
 #include "sysreg.h"
@@ -337,7 +339,8 @@ static uint32_t helper(HvCpu *cpu, const HvHelperInfo *info_in) {
     HvHelperInfo info_copy = *info_in;
     info_copy.op &= 0xff; /* the rest: hv_helper_thunk's refill flags */
     const HvHelperInfo *info = &info_copy;
-    if (info->op < 12 && cpu->m->stats_interval) cpu->m->stats.helper[info->op]++;
+    if (info->op < sizeof cpu->m->stats.helper / sizeof cpu->m->stats.helper[0] && cpu->m->stats_interval)
+        cpu->m->stats.helper[info->op]++;
     if (cpu->m->stats_interval && (info->op == HV_OP_MRS || info->op == HV_OP_MSR || info->op == HV_OP_SYS))
         reg_hist[(info->insn >> 5) & 0xffff] += info->op == HV_OP_MRS ? 1 : 1ull << 32;
     switch (info->op) {
@@ -370,6 +373,20 @@ static uint32_t helper(HvCpu *cpu, const HvHelperInfo *info_in) {
             cpu->helper_ret = (uint64_t)(uintptr_t)code;
             return 0;
         }
+        return 1;
+    }
+    case HV_OP_A12_COMPAT: {
+        /* The assembly helper saved vector registers and NZCV, but leaves FP state live. */
+        hv_fp_leave(cpu);
+        int done = hv_a12_compat_exec(cpu, info->insn);
+        if (!done) done = hv_a12_fp_exec(cpu, info->insn);
+        hv_fp_enter(cpu);
+        if (done == 1) return 0;
+        fprintf(stderr, "hengevm: A12 fallback unavailable: insn %08x at guest pc %llx\n",
+                info->insn, (unsigned long long)info->pc);
+        cpu->pc = info->pc;
+        cpu->exit_insn = info->insn;
+        cpu->exit_reason = HV_EXIT_UNSUPPORTED;
         return 1;
     }
     case HV_OP_FPTRAP:

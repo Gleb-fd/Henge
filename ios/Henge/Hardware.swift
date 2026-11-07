@@ -36,6 +36,7 @@ enum Device {
 
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {
+        if experimentalA12Z { return 3 }
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
         // m4 fork: an 8 GB iPad (7.4 GB usable) thrashes and kills the Mac at 6 GB: 16 GB devices only.
         return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : 4
@@ -51,16 +52,19 @@ enum Device {
         return nil
     }
 
-    /// The virtual CPU offers Armv8.5 instructions (core/sysreg.c), and macOS uses them. They run as
-    /// they are, so the chip needs them too: A14, M1 and later, which is iPhone13,x and iPad13,x up.
+    /// Only the 2020 iPad Pro models are opted into the experimental software ISA path.
+    static let experimentalA12Z = ["iPad8,9", "iPad8,10", "iPad8,11", "iPad8,12"].contains(HengeLog.deviceModel)
+    static let experimentalA12ZText = "Experimental A12Z support: CPU instruction fallbacks are enabled. macOS boot and graphics are not yet verified on this iPad. Start with Sequoia and 3 GB of guest memory."
+
     static let chipTooOld: Bool = {
+        if experimentalA12Z { return false }
         let model = HengeLog.deviceModel
         guard model.hasPrefix("iPhone") || model.hasPrefix("iPad"),
               let major = Int(model.drop { !$0.isNumber }.prefix { $0.isNumber }) else { return false }
         return major < 13
     }()
 
-    static let chipTooOldText = "macOS won't run on this \(name). Henge needs an A14 or M1 chip or newer."
+    static let chipTooOldText = "This chip is not supported. Use an A14/M1 or newer, or a 2020 A12Z iPad Pro with experimental support."
 }
 
 /// A keyboard attached to the device. iOS reports each key going down and coming up by its HID usage,
