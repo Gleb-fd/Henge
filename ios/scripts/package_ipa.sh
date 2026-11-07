@@ -18,12 +18,15 @@ DD="$IOS/build/DerivedData"
 mkdir -p "$IOS/build"
 xcodebuild -project Henge.xcodeproj -scheme Henge -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
     -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > "$DD.buildlog" 2>&1 || {
+    # Keep linker diagnostics and their context; grepping only "error:" hides
+    # undefined symbols, missing libraries and the command that failed.
     # Never package what an older build left behind.
-    grep -E "error:|BUILD" "$DD.buildlog" | sort -u
+    echo "==> last 200 lines of $DD.buildlog" >&2
+    tail -n 200 "$DD.buildlog" >&2
     echo "==> the build failed; nothing packaged" >&2
     exit 1
 }
-grep -E "BUILD" "$DD.buildlog" || true
+grep -E '^\*\* BUILD ' "$DD.buildlog" || true
 APP="$DD/Build/Products/Release-iphoneos/Henge.app"
 rc=0
 for f in "$APP/Henge" "$APP/henge-jit.js" "$APP/PlugIns/HengeJITHelper.appex/HengeJITHelper" \
