@@ -1,0 +1,38 @@
+workflows:
+  a12z-unsigned-ipa:
+    name: Henge A12Z experimental IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: latest
+    scripts:
+      - name: Check Apple Silicon and Xcode
+        script: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          version=$(xcodebuild -version | awk '/^Xcode / {print $2}')
+          major=${version%%.*}
+          if [ "${major:-0}" -lt 27 ]; then
+            echo 'Henge needs Xcode 27+. Select a compatible build image.' >&2
+            exit 1
+          fi
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: A12 semantics and forced-fallback JIT tests
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          mkdir -p ci-logs
+          make test-a12-compat 2>&1 | tee ci-logs/a12-tests.log
+      - name: Build dependencies and ad-hoc IPA
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          bash ci/build-ios.sh 2>&1 | tee ci-logs/build.log
+          mkdir -p build/artifacts
+          cp "$HOME/Desktop/Henge.ipa" \
+            build/artifacts/Henge-A12Z-experimental.ipa
+    artifacts:
+      - build/artifacts/*.ipa
+      - ci-logs/*.log
+      - ios/build/*.buildlog
