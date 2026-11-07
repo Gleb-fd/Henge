@@ -14,12 +14,14 @@ if [ "$1" = mac ]; then
     BUILD="$ROOT/build/mac-restore"
     SDKNAME=macosx
     CC=(xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=14.0)
-    CMAKE_TARGET=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0)
+    CMAKE_TARGET=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+                  -DCMAKE_C_COMPILER_TARGET=arm64-apple-macos14.0)
 else
     BUILD="$ROOT/build/ios"
     SDKNAME=iphoneos
     CC=(xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0)
-    CMAKE_TARGET=(-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0)
+    CMAKE_TARGET=(-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0
+                  -DCMAKE_C_COMPILER_TARGET=arm64-apple-ios17.0)
 fi
 OUT="$BUILD/restore"
 DEPS="$BUILD/deps"
@@ -47,16 +49,17 @@ compile() { # name extra-flags... -- files...
     done
 }
 
-# libzip: cmake makes its config headers and the library.
-if [ ! -f "$DEPS/libzip/lib/libzip.a" ]; then
-    cmake -S "$TP/libzip" -B "$DEPS/libzip" "${CMAKE_TARGET[@]}" -DCMAKE_OSX_ARCHITECTURES=arm64 \
-        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-        -DZLIB_INCLUDE_DIR="$SDK/usr/include" -DZLIB_LIBRARY="$SDK/usr/lib/libz.tbd" -DENABLE_COMMONCRYPTO=OFF \
-        -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF -DENABLE_WINDOWS_CRYPTO=OFF -DENABLE_BZIP2=OFF \
-        -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_OSSFUZZ=OFF \
-        -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF -DLIBZIP_DO_INSTALL=OFF >/dev/null
-    cmake --build "$DEPS/libzip" -j4 >/dev/null
-fi
+# libzip: use the same SDK/compiler platform as the hand-built restore objects.
+# Configure and build even when libzip.a exists, so changed target flags rebuild
+# cached objects rather than silently retaining a Mac Catalyst archive.
+cmake -S "$TP/libzip" -B "$DEPS/libzip" "${CMAKE_TARGET[@]}" -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_C_COMPILER="$(xcrun --sdk "$SDKNAME" --find clang)" -DCMAKE_OSX_SYSROOT="$SDK" \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+    -DZLIB_INCLUDE_DIR="$SDK/usr/include" -DZLIB_LIBRARY="$SDK/usr/lib/libz.tbd" -DENABLE_COMMONCRYPTO=OFF \
+    -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF -DENABLE_WINDOWS_CRYPTO=OFF -DENABLE_BZIP2=OFF \
+    -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_OSSFUZZ=OFF \
+    -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF -DLIBZIP_DO_INSTALL=OFF >/dev/null
+cmake --build "$DEPS/libzip" -j4 >/dev/null
 
 compile mbedtls -I"$TP/mbedtls/library" -- "$TP"/mbedtls/library/*.c
 compile plist -I"$TP/libplist/libcnary/include" -DPACKAGE_VERSION='"2.8.0-henge"' -- \
