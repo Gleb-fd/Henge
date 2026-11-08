@@ -64,4 +64,52 @@ separate suite, not implied by this target.
    `henge-native.log` after failures. An unsupported-opcode stop is useful
    evidence; a successful build is not proof of a successful macOS boot.
 
-Build instructions are in [a12z-build.md](a12z-build.md).
+## Device crash evidence and diagnostic build
+
+The first A12Z runs reached sustained guest instruction execution and GPU
+surface creation. This does not establish a completed macOS setup, a usable
+desktop or complete CPU correctness. One captured boot used four CPUs,
+2560 MB effective RAM (4096 MB requested), a 1024 MB JIT region and 120 Hz;
+these are observations, not the conservative settings above.
+
+Three system reports terminate in `AGXMetalA12` while creating a render encoder,
+with `BackgroundObjectProgram` compilation on the stack and a LIBSYSTEM
+“Application Triggered Fault” termination. These are not evidence of a jetsam
+kill. The exact framebuffer configuration or underlying resource failure is
+not yet known. Formats 80 (BGRA8Unorm) and 115 (RGBA16Float) are supported on
+this GPU; their allocation failures do not prove a missing format capability.
+A separately logged unlowered AIR intrinsic is a shader compatibility error,
+but has not been tied to the fatal render-pass failure.
+
+The diagnostic patch rejects truncated replay records and passes whose nonzero
+attachment/resolve/visibility references cannot be resolved. It checks texture
+subresources before calling Metal, rather than silently replacing missing
+requested attachments or resolves with different load/store semantics. A
+rejected pass is counted and logged; it can leave missing graphics. This is
+not a replacement renderer or a guarantee against driver termination.
+
+`HV_PVG_DIAGNOSTICS=1` logs bounded raw pass data, attachment properties and
+pipeline/library starts before entering Metal. It is enabled by default only
+on the experimental A12Z devices. To reduce diagnostic I/O, set
+`HV_PVG_DIAGNOSTICS=0` in Documents/henge-env.txt before starting a session.
+The logs still grow during a run; the bound is per diagnostic entry, not a
+whole-session size limit. A final “pass start” is evidence of work submitted,
+not proof that an asynchronous compiler fault belongs to that exact pass.
+`NSException` handling cannot recover safely from native driver aborts or
+SIGKILL.
+
+A separate report faults while Darwin lazily instantiates a thread-local
+variable inside the JIT signal guard. The patch removes that TLS access and
+recognizes only the saved PCs of the three exact BRK request instructions.
+It does not swallow unrelated traps or establish why the original GLib trap
+occurred.
+
+`make test-runtime-guards` covers portable wire-length and trap-PC policies.
+Darwin arm64 also exercises the three real BRK routines; Linux reports that
+part as skipped. iOS/macOS SDK compilation and another A12Z reproduction are
+still required. Keep both application logs and system crash reports; when
+using `idevicecrashreport`, pass `--keep` to copy without removing device reports.
+
+Build and data-preserving update instructions are in
+[a12z-build.md](a12z-build.md). No guest macOS reinstall is required by these
+source changes.

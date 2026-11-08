@@ -47,6 +47,8 @@
 .p2align 2
 _henge_brk_get_jit_mapping:
     mov     x16, #1              /* CMD_PREPARE_REGION */
+.globl _henge_brk_get_jit_mapping_trap
+_henge_brk_get_jit_mapping_trap:
     brk     #0xf00d
     ret
 
@@ -55,6 +57,8 @@ _henge_brk_get_jit_mapping:
 .p2align 2
 _henge_brk_jit_detach:
     mov     x16, #0              /* CMD_DETACH */
+.globl _henge_brk_jit_detach_trap
+_henge_brk_jit_detach_trap:
     brk     #0xf00d
     ret
 
@@ -63,6 +67,8 @@ _henge_brk_jit_detach:
 .globl _henge_brk_probe
 .p2align 2
 _henge_brk_probe:
+.globl _henge_brk_probe_trap
+_henge_brk_probe_trap:
     brk     #0x69
     ret
 

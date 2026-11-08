@@ -20,6 +20,9 @@ enum EngineTuning {
 
     static func apply() {
         var env = defaults
+        // Record the render-pass configuration before entering the A12Z driver.
+        // A tuning file can turn this off with HV_PVG_DIAGNOSTICS=0.
+        if Device.experimentalA12Z { env["HV_PVG_DIAGNOSTICS"] = "1" }
         let d = UserDefaults.standard
         if d.integer(forKey: refreshKey) == 120 { env["HV_HZ"] = "120" }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }

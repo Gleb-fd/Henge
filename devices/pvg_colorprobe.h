@@ -601,9 +601,12 @@ static void cp_start(HvReplay *r) {
     snprintf(cp.trigger, sizeof cp.trigger, "%s/trigger", cp.dir);
     snprintf(cp.mode_linear, sizeof cp.mode_linear, "%s/mode-linear", cp.dir);
     snprintf(cp.mode_encoded, sizeof cp.mode_encoded, "%s/mode-encoded", cp.dir);
-    cp.every = getenv("HV_COLOR_PROBE_SECS") ? atof(getenv("HV_COLOR_PROBE_SECS")) : 0;
-    cp.metrics_every = getenv("HV_COLOR_PROBE_METRICS_SECS") ? atof(getenv("HV_COLOR_PROBE_METRICS_SECS")) : 15;
-    cp.max = getenv("HV_COLOR_PROBE_MAX") ? (unsigned)atoi(getenv("HV_COLOR_PROBE_MAX")) : 8;
+    const char *every = getenv("HV_COLOR_PROBE_SECS");
+    const char *metrics = getenv("HV_COLOR_PROBE_METRICS_SECS");
+    const char *capture_limit = getenv("HV_COLOR_PROBE_MAX");
+    cp.every = every ? atof(every) : 0;
+    cp.metrics_every = metrics ? atof(metrics) : 15;
+    cp.max = capture_limit ? (unsigned)atoi(capture_limit) : 8;
     cp.last_auto = now_seconds();
     cp_log("probe_start", "dir=%s every_s=%.0f metrics_every_s=%.0f max_captures=%u mode=%s built=\"%s %s\"", cp.dir, cp.every, cp.metrics_every, cp.max, cp_mode_name(hv_half_mode_get()), __DATE__, __TIME__);
     cp_log("color_mode", "mode=%s was=none why=start", cp_mode_name(hv_half_mode_get()));

@@ -43,6 +43,9 @@ static int cursor_scale(void) {
 #include <string.h>
 
 #include "pvg_lite.h"
+#include "pvg_replay_validate.h"
+
+static BOOL pvg_diag(void) { const char *v = getenv("HV_PVG_DIAGNOSTICS"); return v && !strcmp(v, "1"); }
 
 #if !TARGET_OS_IPHONE
 #import <CoreGraphics/CoreGraphics.h>
@@ -363,6 +366,26 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 }
 @end
 
+static NSString *pvg_texture_failure(MTLTextureDescriptor *t, NSString *where) {
+    return [NSString stringWithFormat:@"%@ texture failed: format=%lu type=%lu size=%lux%lux%lu levels=%lu array=%lu samples=%lu storage=%lu usage=%lu options=%lu cpuCache=%lu hazard=%lu", where, (unsigned long)t.pixelFormat, (unsigned long)t.textureType, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.mipmapLevelCount, (unsigned long)t.arrayLength, (unsigned long)t.sampleCount, (unsigned long)t.storageMode, (unsigned long)t.usage, (unsigned long)t.resourceOptions, (unsigned long)t.cpuCacheMode, (unsigned long)t.hazardTrackingMode];
+}
+
+static BOOL pvg_subresource(id<MTLTexture> t, NSUInteger level, NSUInteger slice, NSUInteger plane) {
+    if (!t || level >= t.mipmapLevelCount) return NO;
+    NSUInteger slices = t.arrayLength;
+    if (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray) {
+        if (slices > NSUIntegerMax / 6) return NO;
+        slices *= 6;
+    }
+    if (slice >= slices) return NO;
+    NSUInteger depth = t.textureType == MTLTextureType3D ? MAX((NSUInteger)1, t.depth >> MIN(level, sizeof(NSUInteger) * 8 - 1)) : 1;
+    return plane < depth;
+}
+
+static void pvg_log_texture(NSMutableString *log, const char *name, uint32_t ref, id<MTLTexture> t) {
+    [log appendFormat:@" %s=%u fmt=%lu type=%lu size=%lux%lux%lu levels=%lu slices=%lu samples=%lu storage=%lu usage=%lu", name, ref, (unsigned long)t.pixelFormat, (unsigned long)t.textureType, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.mipmapLevelCount, (unsigned long)t.arrayLength, (unsigned long)t.sampleCount, (unsigned long)t.storageMode, (unsigned long)t.usage];
+}
+
 @implementation HvReplay
 
 - (void)complain:(NSString *)what {
@@ -378,9 +401,10 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     if (hv_pvg_lite_task_read(lite, task, h.off, lib.mutableBytes, h.len)) return nil;
     dispatch_data_t data = dispatch_data_create(lib.bytes, lib.length, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     NSError *err = nil;
+    if (pvg_diag()) { fprintf(stderr, "pvg: library start task=%u at=%llx bytes=%u\n", task, (unsigned long long)at, h.len); fflush(stderr); }
     id<MTLLibrary> library = [device newLibraryWithData:data error:&err];
     if (!library) {
-        [self complain:[NSString stringWithFormat:@"library: %@", err.localizedDescription]];
+        [self complain:[NSString stringWithFormat:@"library: domain=%@ code=%ld details=%@", err.domain, (long)err.code, err]];
         return nil;
     }
     {   /* m4 fork: while tracing, keep each library macOS sends, to read its shaders on a Mac */
@@ -398,13 +422,18 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 - (id)makeSerialized:(uint64_t)at length:(uint32_t)size task:(uint32_t)task {
     NSMutableData *all = [NSMutableData dataWithLength:size];
     if (hv_pvg_lite_task_read(lite, task, at, all.mutableBytes, size)) return nil;
+    if (size < 4) { [self complain:@"short serialized header"]; return nil; }
     const uint32_t *w = all.bytes;
     uint32_t tag = w[0];
+    if ((tag == 0xe || tag == 0x33 || tag == 0xb) &&
+        (size < 16 || !pvg_serialized(size, w[3]))) { [self complain:@"short serialized pipeline"]; return nil; }
+    if ((tag == 3 && size < 28) || (tag == 4 && size < 16)) { [self complain:@"short serialized state"]; return nil; }
     if (tag == 0xe || tag == 0x33) { /* render or tile pipeline: {tag, size, ref, length, data} */
         id<HvMetalSPI> spi = (id)device;
         HvContext *ctx = [HvContext new];
         ctx->replay = self, ctx->task = task;
         dispatch_data_t data = dispatch_data_create((const uint8_t *)all.bytes + 16, w[3], NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (pvg_diag()) { fprintf(stderr, "pvg: pipeline deserialize start task=%u tag=%u bytes=%u\n", task, tag, w[3]); fflush(stderr); }
         id descriptor = tag == 0xe ? [spi newRenderPipelineDescriptorWithSerializedData:data deserializationContext:ctx]
                                    : [spi newTileRenderPipelineDescriptorWithSerializedData:data deserializationContext:ctx];
         if (!descriptor || ctx->failure) {
@@ -412,9 +441,21 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
             return nil;
         }
         NSError *err = nil;
+        if (pvg_diag()) {
+            if (tag == 0xe) {
+                MTLRenderPipelineDescriptor *rp = descriptor;
+                fprintf(stderr, "pvg: render pipeline start task=%u vertex=%s fragment=%s samples=%lu depth=%lu stencil=%lu colors=", task, rp.vertexFunction.name.UTF8String ?: "-", rp.fragmentFunction.name.UTF8String ?: "-", (unsigned long)rp.sampleCount, (unsigned long)rp.depthAttachmentPixelFormat, (unsigned long)rp.stencilAttachmentPixelFormat);
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%s%lu", i ? "," : "", (unsigned long)rp.colorAttachments[i].pixelFormat);
+            } else {
+                MTLTileRenderPipelineDescriptor *tp = descriptor;
+                fprintf(stderr, "pvg: tile pipeline start task=%u function=%s samples=%lu colors=", task, tp.tileFunction.name.UTF8String ?: "-", (unsigned long)tp.rasterSampleCount);
+                for (int i = 0; i < 8; i++) fprintf(stderr, "%s%lu", i ? "," : "", (unsigned long)tp.colorAttachments[i].pixelFormat);
+            }
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
         id state = tag == 0xe ? [device newRenderPipelineStateWithDescriptor:descriptor error:&err]
                               : [device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
-        if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: %@", tag, err.localizedDescription]];
+        if (!state) [self complain:[NSString stringWithFormat:@"pipeline %u: domain=%@ code=%ld details=%@", tag, err.domain, (long)err.code, err]];
         if (tag == 0xe && getenv("HV_SHADER_DUMP") && atoi(getenv("HV_SHADER_DUMP"))) { /* m4 fork: blend state as this iOS read it */
             MTLRenderPipelineDescriptor *rp = descriptor;
             for (int i = 0; i < 4; i++) {
@@ -438,14 +479,16 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         HvContext *ctx = [HvContext new];
         ctx->replay = self, ctx->task = task;
         dispatch_data_t data = dispatch_data_create((const uint8_t *)all.bytes + 16, w[3], NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (pvg_diag()) { fprintf(stderr, "pvg: compute deserialize start task=%u bytes=%u\n", task, w[3]); fflush(stderr); }
         id descriptor = [spi newComputePipelineDescriptorWithSerializedData:data deserializationContext:ctx];
         if (!descriptor || ctx->failure) {
             [self complain:[NSString stringWithFormat:@"compute descriptor: %@", ctx->failure]];
             return nil;
         }
         NSError *err = nil;
+        if (pvg_diag()) { MTLComputePipelineDescriptor *cp = descriptor; fprintf(stderr, "pvg: compute pipeline start task=%u function=%s\n", task, cp.computeFunction.name.UTF8String ?: "-"); fflush(stderr); }
         id state = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
-        if (!state) [self complain:[NSString stringWithFormat:@"compute pipeline: %@", err.localizedDescription]];
+        if (!state) [self complain:[NSString stringWithFormat:@"compute pipeline: domain=%@ code=%ld details=%@", err.domain, (long)err.code, err]];
         return state;
     }
     if (tag == 3) { /* sampler: {tag, size, ref, bits, lod min, lod max, ...} */
@@ -480,6 +523,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         d.depthWriteEnabled = (f >> 3) & 1;
         for (int side = 0; side < 2; side++) {
             if (!((f >> (4 + side)) & 1)) continue;
+            if (!pvg_range(size, 16 + side * 12, 12)) { [self complain:@"short stencil state"]; return nil; }
             const uint32_t *t = w + 4 + side * 3;
             MTLStencilDescriptor *sd = [MTLStencilDescriptor new];
             sd.stencilCompareFunction = (MTLCompareFunction)(t[0] & 7);
@@ -550,6 +594,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
 - (void)makeTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task:(uint32_t)task {
     NSMutableData *all = [NSMutableData dataWithLength:size];
     if (hv_pvg_lite_task_read(lite, task, at, all.mutableBytes, size)) return;
+    if (size < 12 + 0x18) { [self complain:@"short texture header"]; return; }
     const uint8_t *d = all.bytes;
     /* {length, page}, a layout table, {tag, size, ref}, the description. */
     memcpy(&o->length, d, 8);
@@ -561,17 +606,18 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     memcpy(&o->tex_stride, layout + 12, 8);
     o->tex_block_h = layout[0x15];
     uint32_t table = o->tex_mips * 36;
-    if (12 + 0x18 + table + 12 > size) { [self complain:@"texture entry too small"]; return; }
+    if (!pvg_texture_table(size, o->tex_mips)) { [self complain:@"texture entry too small"]; return; }
     o->tex_layout = malloc(table);
     memcpy(o->tex_layout, layout + 0x18, table);
     const uint8_t *rec = layout + 0x18 + table;
     uint32_t tag = *(const uint32_t *)rec;
+    if (!pvg_texture_desc(size, (size_t)(rec - d) + 12, tag == 0x34 || tag == 0x39)) { [self complain:@"short texture descriptor"]; return; }
     MTLTextureDescriptor *t = (tag == 0x34 || tag == 0x39) ? descriptor_v2(rec + 12) : descriptor_v1(rec + 12);
     t.storageMode = MTLStorageModePrivate;
     t.usage |= MTLTextureUsageShaderRead;
     o->object = [device newTextureWithDescriptor:t];
     o->guest_backed = YES;
-    if (!o->object) [self complain:[NSString stringWithFormat:@"texture format %lu %lux%lu failed", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height]];
+    if (!o->object) [self complain:pvg_texture_failure(t, @"private")];
 }
 
 /* A texture over a buffer: {tag 9, size, ref, buffer ref, offset, bytes per row, description}. */
@@ -579,12 +625,15 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     struct __attribute__((packed)) { uint32_t tag, size, ref, buffer; uint64_t offset, row; uint8_t d[64]; } h;
     memset(&h, 0, sizeof h);
     if (hv_pvg_lite_task_read(lite, task, at, &h, MIN(size, (uint32_t)sizeof h))) return;
+    if (size < 4) { [self complain:@"short linear texture header"]; return; }
+    size_t need = pvg_linear_texture_min_size(h.tag);
+    if (size < need) { [self complain:@"short linear texture descriptor"]; return; }
     if (h.tag == 0x34 || h.tag == 0x14 || h.tag == 1) { /* no guest memory at all: {tag, size, ref, description} */
         const uint8_t *desc = (const uint8_t *)&h.buffer;
         MTLTextureDescriptor *t = h.tag == 0x34 ? descriptor_v2(desc) : descriptor_v1(desc);
         t.storageMode = MTLStorageModePrivate;
         o->object = [device newTextureWithDescriptor:t];
-        if (!o->object) [self complain:[NSString stringWithFormat:@"texture format %lu %lux%lu samples %lu failed", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.sampleCount]];
+        if (!o->object) [self complain:pvg_texture_failure(t, @"private")];
         return;
     }
     if (h.tag == 0x15 || h.tag == 0x38) { /* in a heap: {tag, size, ref, heap, description, offset after 0x24 or 0x2c} */
@@ -598,9 +647,10 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
         o->parent = parent;
         o->object = [heap newTextureWithDescriptor:t offset:(NSUInteger)offset];
         if (!o->object) {
-            [self complain:[NSString stringWithFormat:@"heap texture format %lu %lux%lu at %llu of ref %u failed", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, offset, h.buffer]];
+            [self complain:pvg_texture_failure(t, [NSString stringWithFormat:@"heap ref=%u offset=%llu", h.buffer, offset])];
             t.storageMode = MTLStorageModePrivate;
             o->object = [device newTextureWithDescriptor:t];
+            if (!o->object) [self complain:pvg_texture_failure(t, @"heap fallback private")];
         }
         return;
     }
@@ -638,7 +688,7 @@ static MTLTextureDescriptor *descriptor_v2(const uint8_t *d) {
     o->parent = b;
     o->follows = b, o->follows_generation = b->generation;
     o->object = [buffer newTextureWithDescriptor:t offset:h.offset bytesPerRow:h.row];
-    if (!o->object) [self complain:[NSString stringWithFormat:@"linear texture format %lu row %llu failed", (unsigned long)t.pixelFormat, h.row]];
+    if (!o->object) [self complain:pvg_texture_failure(t, [NSString stringWithFormat:@"linear ref=%u offset=%llu row=%llu", h.buffer, h.offset, h.row])];
 }
 
 /* A multi-plane surface as a real IOSurface, laid out as the guest laid it out.
@@ -966,17 +1016,29 @@ typedef struct {
 #define U64(off) ({ uint64_t _v; memcpy(&_v, r.p + (off), 8); _v; })
 
 - (id<MTLRenderCommandEncoder>)beginPass:(Rec)r task:(uint32_t)task commandBuffer:(id<MTLCommandBuffer>)cb {
+    static _Atomic uint64_t pass_id;
+    uint64_t pass = atomic_fetch_add(&pass_id, 1) + 1;
+    uint32_t samples = pre_raster_samples, imageblock = pre_imageblock, threadgroup = pre_threadgroup, tile_w = pre_tile_w, tile_h = pre_tile_h;
+    pre_raster_samples = pre_imageblock = pre_threadgroup = pre_tile_w = pre_tile_h = 0;
+    if (!pvg_pass_fixed(r.size)) { [self complain:@"short render pass"]; failed++; return nil; }
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
-#define ATTACH(a, o)                                                 \
-    do {                                                             \
-        a.texture = [self get:U32((o)) task:task];                   \
-        a.resolveTexture = [self get:U32((o) + 4) task:task];        \
-        a.level = U16((o) + 8), a.slice = U16((o) + 10);             \
-        a.depthPlane = U16((o) + 12), a.resolveLevel = U16((o) + 14); \
-        a.resolveSlice = U16((o) + 16), a.resolveDepthPlane = U16((o) + 18); \
-        a.loadAction = (MTLLoadAction)U16((o) + 20);                 \
-        a.storeAction = (MTLStoreAction)U16((o) + 22);               \
-        a.storeActionOptions = U16((o) + 24);                        \
+#define ATTACH(a, o) do { \
+        uint32_t ref = U32(o), resolve = U32((o) + 4); \
+        id tex = ref ? [self get:ref task:task] : nil; \
+        id res = resolve ? [self get:resolve task:task] : nil; \
+        if ((ref && (!tex || ![tex conformsToProtocol:@protocol(MTLTexture)])) || \
+            (resolve && (!res || ![res conformsToProtocol:@protocol(MTLTexture)]))) { \
+            [self complain:[NSString stringWithFormat:@"pass %llu task %u attachment offset %x failed texture refs %u/%u", (unsigned long long)pass, task, (unsigned)(o), ref, resolve]]; failed++; return nil; \
+        } \
+        a.texture = tex; a.resolveTexture = res; \
+        a.level = U16((o) + 8); a.slice = U16((o) + 10); a.depthPlane = U16((o) + 12); \
+        a.resolveLevel = U16((o) + 14); a.resolveSlice = U16((o) + 16); a.resolveDepthPlane = U16((o) + 18); \
+        a.loadAction = (MTLLoadAction)U16((o) + 20); a.storeAction = (MTLStoreAction)U16((o) + 22); a.storeActionOptions = U16((o) + 24); \
+        if ((tex && !pvg_subresource(tex, a.level, a.slice, a.depthPlane)) || \
+            (res && !pvg_subresource(res, a.resolveLevel, a.resolveSlice, a.resolveDepthPlane)) || \
+            (tex && !res && (a.storeAction == MTLStoreActionMultisampleResolve || a.storeAction == MTLStoreActionStoreAndMultisampleResolve))) { \
+            [self complain:[NSString stringWithFormat:@"pass %llu task %u invalid attachment offset %x refs %u/%u", (unsigned long long)pass, task, (unsigned)(o), ref, resolve]]; failed++; return nil; \
+        } \
     } while (0)
     ATTACH(d.depthAttachment, 0);
     double clear_depth;
@@ -984,48 +1046,69 @@ typedef struct {
     d.depthAttachment.clearDepth = clear_depth;
     ATTACH(d.stencilAttachment, 0x28);
     d.stencilAttachment.clearStencil = U32(0x44);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8 && pvg_pass_color(r.size, i); i++) {
         uint32_t o = 0x4c + (uint32_t)i * 0x3c;
-        if (o + 0x3c > r.size) break;
         MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
         ATTACH(c, o);
         double col[4];
         memcpy(col, r.p + o + 0x1c, sizeof col);
         c.clearColor = MTLClearColorMake(col[0], col[1], col[2], col[3]);
     }
-    /* Memoryless and resolve store actions want the matching textures; a pass with none stays dontCare. */
-    for (int i = 0; i < 8; i++) {
-        MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
-        if (!c.texture) c.storeAction = MTLStoreActionDontCare, c.loadAction = MTLLoadActionDontCare;
-        else if (!c.resolveTexture && (c.storeAction == MTLStoreActionMultisampleResolve || c.storeAction == MTLStoreActionStoreAndMultisampleResolve))
-            c.storeAction = MTLStoreActionStore;
-    }
-    if (!d.depthAttachment.texture) d.depthAttachment.loadAction = MTLLoadActionDontCare, d.depthAttachment.storeAction = MTLStoreActionDontCare;
-    if (!d.stencilAttachment.texture) d.stencilAttachment.loadAction = MTLLoadActionDontCare, d.stencilAttachment.storeAction = MTLStoreActionDontCare;
+#undef ATTACH
     /* After the attachments: the visibility buffer and the render target's size. */
-    if (r.size >= 0x248) {
-        if (U32(0x22c)) d.visibilityResultBuffer = [self get:U32(0x22c) task:task];
+    if (pvg_pass_metadata(r.size)) {
+        uint32_t ref = U32(0x22c);
+        id buffer = ref ? [self get:ref task:task] : nil;
+        if (ref && (!buffer || ![buffer conformsToProtocol:@protocol(MTLBuffer)])) {
+            [self complain:[NSString stringWithFormat:@"pass %llu task %u failed visibility buffer ref %u", (unsigned long long)pass, task, ref]]; failed++; return nil;
+        }
+        d.visibilityResultBuffer = buffer;
         uint64_t layers = U64(0x230), rw = U64(0x238), rh = U64(0x240);
         if (layers) d.renderTargetArrayLength = (NSUInteger)layers;
         if (rw) d.renderTargetWidth = (NSUInteger)rw;
         if (rh) d.renderTargetHeight = (NSUInteger)rh;
     }
     /* What came before the pass itself. */
-    if (pre_raster_samples) d.defaultRasterSampleCount = pre_raster_samples;
-    if (pre_imageblock) d.imageblockSampleLength = pre_imageblock;
-    if (pre_threadgroup) d.threadgroupMemoryLength = pre_threadgroup;
-    if (pre_tile_w) d.tileWidth = pre_tile_w, d.tileHeight = pre_tile_h;
-    pre_raster_samples = pre_imageblock = pre_threadgroup = pre_tile_w = pre_tile_h = 0;
-    if (tracing) {
+    if (samples) d.defaultRasterSampleCount = samples;
+    if (imageblock) d.imageblockSampleLength = imageblock;
+    if (threadgroup) d.threadgroupMemoryLength = threadgroup;
+    if (tile_w) d.tileWidth = tile_w, d.tileHeight = tile_h;
+    if (tracing && pvg_pass_color(r.size, 0)) {
         id<MTLTexture> c0 = d.colorAttachments[0].texture;
         MTLClearColor cc = d.colorAttachments[0].clearColor;
         HvObject *co = [self object:U32(0x4c) task:task];
         fprintf(stderr, "trace: pass c0 ref %u %lux%lu fmt %lu load %lu store %lu clear %.2f %.2f %.2f %.2f surface %s heap %d\n", U32(0x4c), (unsigned long)c0.width, (unsigned long)c0.height, (unsigned long)c0.pixelFormat, (unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction, cc.red, cc.green, cc.blue, cc.alpha, co && co->surface ? "yes" : "no", c0.heap != nil);
     }
+    if (pvg_diag()) {
+        char raw[0x248 * 2 + 1];
+        static const char hex[] = "0123456789abcdef";
+        size_t bytes = MIN((size_t)r.size, (size_t)0x248);
+        for (size_t i = 0; i < bytes; i++) raw[2 * i] = hex[r.p[i] >> 4], raw[2 * i + 1] = hex[r.p[i] & 15];
+        raw[2 * bytes] = 0;
+        NSMutableString *log = [NSMutableString stringWithFormat:@"pvg: pass start task=%u id=%llu size=%u raw=%s\n", task, (unsigned long long)pass, r.size, raw];
+        for (int i = -2; i < 8; i++) {
+            if (i >= 0 && !pvg_pass_color(r.size, i)) break;
+            unsigned off = i == -2 ? 0 : i == -1 ? 0x28 : 0x4c + i * 0x3c;
+            if (!U32(off) && !U32(off + 4)) continue; /* absent slots are already in raw */
+            MTLRenderPassAttachmentDescriptor *a;
+            if (i == -2) a = d.depthAttachment;
+            else if (i == -1) a = d.stencilAttachment;
+            else a = d.colorAttachments[i];
+            [log appendFormat:@"pvg: pass %llu attachment=%d", (unsigned long long)pass, i];
+            pvg_log_texture(log, "texture", U32(off), a.texture);
+            if (U32(off + 4)) pvg_log_texture(log, "resolve", U32(off + 4), a.resolveTexture);
+            [log appendFormat:@" sub=%lu/%lu/%lu resolveSub=%lu/%lu/%lu load=%lu store=%lu options=%lu\n", (unsigned long)a.level, (unsigned long)a.slice, (unsigned long)a.depthPlane, (unsigned long)a.resolveLevel, (unsigned long)a.resolveSlice, (unsigned long)a.resolveDepthPlane, (unsigned long)a.loadAction, (unsigned long)a.storeAction, (unsigned long)a.storeActionOptions];
+        }
+        [log appendFormat:@"pvg: pass %llu visibility=%u layers=%lu width=%lu height=%lu samples=%lu imageblock=%lu tile=%lux%lu threadgroup=%lu", (unsigned long long)pass, pvg_pass_metadata(r.size) ? U32(0x22c) : 0, (unsigned long)d.renderTargetArrayLength, (unsigned long)d.renderTargetWidth, (unsigned long)d.renderTargetHeight, (unsigned long)d.defaultRasterSampleCount, (unsigned long)d.imageblockSampleLength, (unsigned long)d.tileWidth, (unsigned long)d.tileHeight, (unsigned long)d.threadgroupMemoryLength];
+        /* stderr is unbuffered: one write avoids hundreds of writes per pass. */
+        fprintf(stderr, "%s\n", log.UTF8String);
+        fflush(stderr);
+    }
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+    if (e && pvg_diag()) { fprintf(stderr, "pvg: pass success task=%u id=%llu\n", task, (unsigned long long)pass); fflush(stderr); }
     if (!e) {
         NSMutableString *m = [NSMutableString stringWithString:@"no render encoder:"];
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8 && pvg_pass_color(r.size, i); i++) {
             MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i];
             uint32_t ref = U32(0x4c + (uint32_t)i * 0x3c);
             if (ref) [m appendFormat:@" c%d ref %u %s %lux%lu fmt %lu load %lu store %lu usage %lu", i, ref, c.texture ? "ok" : "MISSING", (unsigned long)c.texture.width, (unsigned long)c.texture.height, (unsigned long)c.texture.pixelFormat, (unsigned long)c.loadAction, (unsigned long)c.storeAction, (unsigned long)c.texture.usage];

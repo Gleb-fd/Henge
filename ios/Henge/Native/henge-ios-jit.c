@@ -7,6 +7,7 @@
  */
 
 #include "henge-ios-jit.h"
+#include "henge-jit-trap.h"
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -114,6 +115,9 @@ static double henge_now_ms(void)
 extern void    *henge_brk_get_jit_mapping(void *addr, size_t len);
 extern void     henge_brk_jit_detach(void);
 extern uint64_t henge_brk_probe(void);
+extern const char henge_brk_get_jit_mapping_trap;
+extern const char henge_brk_jit_detach_trap;
+extern const char henge_brk_probe_trap;
 
 /*
  * StikDebug answers brk #0x69 by writing a constant into x0. Two encodings are
@@ -139,23 +143,21 @@ static atomic_bool           g_jit_available;
 static atomic_uint_least64_t g_alloc_counter;
 
 /* ------------------------------------------------------- unserviced-trap guard */
-/*
- * Set for exactly the duration of the BreakGetJITMapping call. If StikDebug is
- * not there to service the brk, the trap is a real SIGTRAP that would otherwise
- * kill the process outright -- there is no "call returned an error" to recover
- * from. The handler below turns that into a NULL return, which the allocation
- * path already handles.
- */
-static _Thread_local bool g_expecting_jit_trap;
-
+/* Only the three request instructions may be stepped over.  In particular,
+ * signal delivery must not touch thread-local storage, which Darwin may lazily
+ * allocate in the handler. */
 static struct sigaction g_prev_sigtrap;
 static struct sigaction g_prev_sigbus;
 
 static void henge_trap_handler(int sig, siginfo_t *info, void *ctx)
 {
     (void)info;
-    if (g_expecting_jit_trap && ctx != NULL) {
-        ucontext_t *uc = (ucontext_t *)ctx;
+    ucontext_t *uc = (ucontext_t *)ctx;
+    if (uc != NULL && uc->uc_mcontext != NULL &&
+        henge_jit_is_trap_pc((uintptr_t)uc->uc_mcontext->__ss.__pc,
+                             (uintptr_t)&henge_brk_get_jit_mapping_trap,
+                             (uintptr_t)&henge_brk_jit_detach_trap,
+                             (uintptr_t)&henge_brk_probe_trap)) {
         /* Step over the brk and report failure in x0, exactly as the
          * StikDebug-serviced path would have written a result there. */
         uc->uc_mcontext->__ss.__pc += 4;
@@ -616,9 +618,7 @@ static HengeDualMapping henge_ios_jit_allocate_real(size_t bytes)
      * is live, and swallowed by our trap handler as 0 when it is not. Doing this
      * first turns "no debugger" into a clean diagnostic instead of three slow
      * retries of the real request. */
-    g_expecting_jit_trap = true;
     uint64_t probe = henge_brk_probe();
-    g_expecting_jit_trap = false;
     if (probe == 0) {
         HENGE_LOG("#%llu: StikDebug is NOT servicing traps -- probe returned 0, which "
                  "is our own SIGTRAP handler stepping over an unanswered brk. "
@@ -661,9 +661,7 @@ static HengeDualMapping henge_ios_jit_allocate_real(size_t bytes)
                  (unsigned long long)n, bytes, (double)bytes / (1024.0 * 1024.0),
                  attempt, kMaxAttempts);
 
-        g_expecting_jit_trap = true;
         rx = henge_brk_get_jit_mapping(NULL, bytes);
-        g_expecting_jit_trap = false;
 
         HENGE_LOG("#%llu: BreakGetJITMapping returned %p", (unsigned long long)n, rx);
         if (rx != NULL) {
@@ -773,9 +771,7 @@ void henge_ios_jit_release(HengeDualMapping *m)
 void henge_ios_jit_detach(void)
 {
     HENGE_LOG("detaching debugger; RX mappings persist after this");
-    g_expecting_jit_trap = true;
     henge_brk_jit_detach();
-    g_expecting_jit_trap = false;
     HENGE_LOG("debugger detached");
 }
 

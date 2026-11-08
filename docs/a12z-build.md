@@ -16,8 +16,10 @@
    with your sideloader before installing. No Apple signing secrets are needed
    for this build.
 
-CPU tests and a source-only Swift/renderer compile run before the dependency
-build. `ci-logs/a12-tests.log`, `ci-logs/ios-sources.log`, `ci-logs/build.log`
+CPU tests, runtime-guard tests and a source-only Swift/renderer/JIT-guard
+compile run before the dependency build. The runtime-guard target is
+`make test-runtime-guards`: wire-format bounds checks run on any host, while
+execution of the three BRK request routines is tested only on Darwin arm64. `ci-logs/a12-tests.log`, `ci-logs/ios-sources.log`, `ci-logs/build.log`
 and Xcode's `ios/build/*.buildlog` are collected as artifacts
 when available. There are no push/webhook triggers in `codemagic.yaml`, so
 builds start manually. Do not put Apple credentials or device pairing files in
@@ -48,3 +50,33 @@ Henge with the same Xcode; do not reuse this XCFramework across toolchains.
 upload. The CI job requires
 `make test-a12-compat` before building dependencies and packaging; it does not
 run the full Mac-only `make test`. A successful build is not a device test.
+
+## Updating an existing installation without reinstalling macOS
+
+Stop the guest before exporting or updating. In the Mac's settings, choose
+**Export**, wait for completion, then **Move Out of Henge…** to put the result
+outside Henge's container, for example in iCloud Drive or on another computer.
+An export left under Files → Henge → Exports is deleted if Henge is deleted.
+The export contains the guest disk, auxiliary state, ROM and machine identity;
+it does not include the downloaded IPSW installer.
+
+For iloader 2.4.1, use the same Apple account/team and install the new IPA over
+the existing application. The normal install path does not uninstall first;
+it deterministically appends the signing team to the IPA's original bundle ID.
+An update with the same application identity normally preserves the data
+container, so the existing macOS disk and downloaded installer remain in place.
+Do not delete Henge first or accept a delete-and-reinstall workaround without
+an external backup. A certificate renewal alone does not imply data deletion.
+A different signing team produces a different bundle ID and may install a
+separate empty app rather than update the old one.
+
+After updating, verify the existing machine and disk are present, not merely
+that a container directory has the same UUID: iOS may move an app's container.
+Re-enable external JIT after restarting Henge. Guest macOS does not need to be
+reinstalled for a renderer or JIT-guard update.
+
+The IPSW is an ordinary file under `Library/Application Support/Machines/Restore
+images` in the private app container. It is not exposed by Henge's VM export or
+Files sharing, but can potentially be copied over USB with authorized full
+container access (`afcclient --container`), when iPadOS permits it. Do not assume
+that a Files-only backup or ordinary device backup includes it.

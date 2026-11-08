@@ -208,8 +208,21 @@ $(B)/test_a12_jit: tests/test_a12_jit.c tests/a12_compat_programs.S tests/harnes
 A12_TESTS = $(B)/test_a12_compat $(B)/test_a12_fp
 ifeq ($(shell uname -s)-$(shell uname -m),Darwin-arm64)
 A12_TESTS += $(B)/test_a12_jit
+IOS_JIT_TRAP_FLAGS = -DHENGE_TEST_NATIVE_BRK
+IOS_JIT_TRAP_ASM = ios/Henge/Native/henge-brk.S
 endif
 
 test-a12-compat: $(A12_TESTS)
 	@for t in $(A12_TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-a12-compat
+
+$(B)/test_ios_jit_trap: tests/test_ios_jit_trap.c ios/Henge/Native/henge-jit-trap.h $(IOS_JIT_TRAP_ASM) | $(B)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 $(IOS_JIT_TRAP_FLAGS) tests/test_ios_jit_trap.c $(IOS_JIT_TRAP_ASM) -o $@
+
+$(B)/test_pvg_replay_validate: tests/test_pvg_replay_validate.c devices/pvg_replay_validate.h | $(B)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 tests/test_pvg_replay_validate.c -o $@
+
+test-runtime-guards: $(B)/test_ios_jit_trap $(B)/test_pvg_replay_validate
+	$(B)/test_ios_jit_trap
+	$(B)/test_pvg_replay_validate
+.PHONY: test-runtime-guards

@@ -27,6 +27,12 @@ xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$I
   "${COMMON[@]}" -c devices/pvg_metal.m -o "$OUT/pvg-ios.o"
 xcrun --sdk macosx clang -arch arm64 "${COMMON[@]}" \
   -c devices/pvg_metal.m -o "$OUT/pvg-mac.o"
+# Compile the trap guard and its instruction labels against the actual iOS SDK too.
+xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$IOS_SDK" \
+  -std=c11 -Wall -Wextra -Wno-unused-parameter -O2 \
+  -c ios/Henge/Native/henge-ios-jit.c -o "$OUT/henge-ios-jit.o"
+xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$IOS_SDK" \
+  -c ios/Henge/Native/henge-brk.S -o "$OUT/henge-brk.o"
 make test-display-routing
 
 # The C handoff must be compiled too: display attachment can race lazy GPU creation.

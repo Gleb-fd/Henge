@@ -23,7 +23,8 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR"
           mkdir -p ci-logs
-          make test-a12-compat 2>&1 | tee ci-logs/a12-tests.log
+          make test-a12-compat test-runtime-guards 2>&1 | \
+            tee ci-logs/a12-tests.log
       - name: Compile app sources against the selected SDK
         script: |
           set -euo pipefail
