@@ -222,7 +222,11 @@ $(B)/test_ios_jit_trap: tests/test_ios_jit_trap.c ios/Henge/Native/henge-jit-tra
 $(B)/test_pvg_replay_validate: tests/test_pvg_replay_validate.c devices/pvg_replay_validate.h | $(B)
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 tests/test_pvg_replay_validate.c -o $@
 
-test-runtime-guards: $(B)/test_ios_jit_trap $(B)/test_pvg_replay_validate
+$(B)/test_pvg_gpu_diag: tests/test_pvg_gpu_diag.c devices/pvg_gpu_diag.h | $(B)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 tests/test_pvg_gpu_diag.c -o $@
+
+test-runtime-guards: $(B)/test_ios_jit_trap $(B)/test_pvg_replay_validate $(B)/test_pvg_gpu_diag
 	$(B)/test_ios_jit_trap
 	$(B)/test_pvg_replay_validate
+	$(B)/test_pvg_gpu_diag
 .PHONY: test-runtime-guards

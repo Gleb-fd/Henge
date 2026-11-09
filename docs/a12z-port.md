@@ -1,9 +1,10 @@
 # Experimental A12Z port
 
 This branch targets the 2020 iPad Pro models `iPad8,9`, `iPad8,10`, `iPad8,11`
-and `iPad8,12`. It is a bring-up build, not a claim that macOS installs or boots
-on these devices. GPU replay and system-wide memory pressure still require
-on-device testing. The upstream minimum remains A14/M1 outside this experiment.
+and `iPad8,12`. On-device runs have reached macOS Setup Assistant, including
+country selection and the account-creation form. Completing setup and a usable
+desktop remain unverified: GPU replay still faults on this device. The upstream
+minimum remains A14/M1 outside this experiment.
 
 ## CPU path
 
@@ -66,9 +67,10 @@ separate suite, not implied by this target.
 
 ## Device crash evidence and diagnostic build
 
-The first A12Z runs reached sustained guest instruction execution and GPU
-surface creation. This does not establish a completed macOS setup, a usable
-desktop or complete CPU correctness. One captured boot used four CPUs,
+A12Z runs reached sustained guest instruction execution, GPU surface creation
+and the graphical Setup Assistant. Text input into the account-name field was
+observed. This does not establish a completed macOS setup, a usable desktop or
+complete CPU correctness. One captured boot used four CPUs,
 2560 MB effective RAM (4096 MB requested), a 1024 MB JIT region and 120 Hz;
 these are observations, not the conservative settings above.
 
@@ -98,13 +100,52 @@ not proof that an asynchronous compiler fault belongs to that exact pass.
 `NSException` handling cannot recover safely from native driver aborts or
 SIGKILL.
 
+Later account-creation runs of `401b45d` show a different failure: two
+`kIOGPUCommandBufferCallbackErrorPageFault` completions followed by thousands of
+`kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` completions. CPU execution
+continues after the display freezes. System `gpuEvent` reports from the same
+period record `BIF0 page fault` GPU reads. A repeat with `HV_PVG_SYNC=1` still
+faults, with no texture-allocation or missing-attachment errors in that run.
+Waiting between GPU batches did not resolve the problem; this does not rule out
+stale addresses or other resource-lifetime errors.
+
+There are three distinct compatibility questions: the representation of argument
+buffers, residency of indirectly accessed resources, and stability of exported
+GPU addresses when guest memory mappings change. The [Metal feature tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)
+classify A12-series GPUs as Apple5 and introduce Tier 2 argument buffers at
+Apple6. [Apple's bindless guidance](https://developer.apple.com/videos/play/wwdc2022/10101/)
+requires Tier 2 for direct argument-buffer encoding with `gpuAddress` and
+`gpuResourceID`, the mechanism used by this replay's object-info replies.
+This is a documented compatibility concern, not attribution of either GPU fault
+to a particular argument buffer. Adding residency declarations alone cannot
+translate a Tier 2 representation for a Tier 1 device.
+
+The next diagnostic build records the actual host capability and requests
+[enhanced command-buffer errors](https://developer.apple.com/videos/play/wwdc2020/10616/)
+with command-buffer and encoder identities. Error reports include bounded
+binding metadata and a history of exported GPU-address ranges, to distinguish
+faulted work from merely affected work and allow offline comparison with the
+system fault address. Diagnostic snapshots contain metadata, not buffer contents,
+and do not keep old Metal resources alive. A retired address record means a
+logical replacement/removal was observed, not that all GPU references were freed.
+Detailed `pvg-diag:` reports are limited to the first four non-blacklisted
+command-buffer errors. Each snapshot includes at most 32 resource summaries,
+64 recent binding/dispatch records and 128 exported address ranges; error output
+selects at most 32 encoder entries, with faulted entries first. Omission and
+history-eviction counts are printed. Presenter/readback command buffers remain
+outside this enhanced-error path; capabilities are logged at renderer startup.
+These diagnostics do not implement a Tier 1 translator, blacklist a shader or
+change residency declarations. The exact failing access remains unestablished.
+
 A separate report faults while Darwin lazily instantiates a thread-local
 variable inside the JIT signal guard. The patch removes that TLS access and
 recognizes only the saved PCs of the three exact BRK request instructions.
 It does not swallow unrelated traps or establish why the original GLib trap
 occurred.
 
-`make test-runtime-guards` covers portable wire-length and trap-PC policies.
+`make test-runtime-guards` covers portable wire-length, trap-PC and bounded
+GPU-address-history policies. These tests do not exercise a Metal shader or
+validate the host's argument-buffer representation.
 Darwin arm64 also exercises the three real BRK routines; Linux reports that
 part as skipped. iOS/macOS SDK compilation and another A12Z reproduction are
 still required. Keep both application logs and system crash reports; when

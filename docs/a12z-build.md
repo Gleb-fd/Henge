@@ -18,8 +18,10 @@
 
 CPU tests, runtime-guard tests and a source-only Swift/renderer/JIT-guard
 compile run before the dependency build. The runtime-guard target is
-`make test-runtime-guards`: wire-format bounds checks run on any host, while
-execution of the three BRK request routines is tested only on Darwin arm64. `ci-logs/a12-tests.log`, `ci-logs/ios-sources.log`, `ci-logs/build.log`
+`make test-runtime-guards`: wire-format bounds and GPU-address-history tests
+run on any host, while execution of the three BRK request routines is tested
+only on Darwin arm64. These portable tests do not validate Metal execution.
+`ci-logs/a12-tests.log`, `ci-logs/ios-sources.log`, `ci-logs/build.log`
 and Xcode's `ios/build/*.buildlog` are collected as artifacts
 when available. There are no push/webhook triggers in `codemagic.yaml`, so
 builds start manually. Do not put Apple credentials or device pairing files in
@@ -50,6 +52,29 @@ Henge with the same Xcode; do not reuse this XCFramework across toolchains.
 upload. The CI job requires
 `make test-a12-compat` before building dependencies and packaging; it does not
 run the full Mac-only `make test`. A successful build is not a device test.
+
+## GPU diagnostic runs
+
+A12Z enables `HV_PVG_DIAGNOSTICS=1` by default. If Documents/henge-env.txt
+contains `HV_PVG_DIAGNOSTICS=0`, remove that override or change it to `1` for
+a diagnostic reproduction. The renderer records host capabilities at startup,
+then identifies command buffers and encoders in bounded error reports. Preserve
+both application logs and system `gpuEvent` reports: a last pipeline-start line
+alone cannot identify work responsible for an asynchronous GPU fault.
+
+`HV_PVG_SYNC=1` is an existing experimental switch that waits after each GPU
+batch; it is not a fix for the reproduced A12Z account-creation fault. For a
+controlled comparison, leave other settings unchanged and report whether this
+switch was set. Its implementation tests presence, not the value: **setting
+`HV_PVG_SYNC=0` does not disable it**. Remove the line to restore the default,
+then fully restart Henge and re-enable JIT. Do not overwrite unrelated tuning
+lines. A run that already initialized this switch keeps its cached value.
+
+After reproducing a failure, collect `henge.log`, `henge-native.log` and their
+`-prev` counterparts before reopening Henge. Use `idevicecrashreport --keep`
+when copying device reports so the originals remain on the device. Stop a
+stuck VM through Henge if it still responds; repeated attempts without new
+diagnostics are not evidence of recovery.
 
 ## Updating an existing installation without reinstalling macOS
 

@@ -44,8 +44,15 @@ static int cursor_scale(void) {
 
 #include "pvg_lite.h"
 #include "pvg_replay_validate.h"
+#include "pvg_gpu_diag.h"
 
 static BOOL pvg_diag(void) { const char *v = getenv("HV_PVG_DIAGNOSTICS"); return v && !strcmp(v, "1"); }
+
+static NSString *pvg_short_string(id value) {
+    if (![value isKindOfClass:[NSString class]]) return @"";
+    NSString *s = value;
+    return s.length > 160 ? [s substringToIndex:160] : s;
+}
 
 #if !TARGET_OS_IPHONE
 #import <CoreGraphics/CoreGraphics.h>
@@ -71,6 +78,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     uint8_t *mapped;
     BOOL mapping_in_buffer; /* the buffer over them frees them */
     BOOL plain_buffer; /* the object is that buffer */
+    uint32_t diag_ref, diag_generation;
     uint32_t generation; /* a new mapping since: what was made from it is out of date */
     HvObject *follows; /* made from this one's buffer */
     uint32_t follows_generation;
@@ -130,6 +138,10 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     /* Work the GPU has not finished. Stamps are given back in the order they came: the
        GPU's completion handlers run in the order of commit. */
     _Atomic int inflight;
+    _Atomic unsigned diag_errors;
+    uint64_t diag_serial;
+    uint32_t diag_generation;
+    PvgGpuHistory diag_history;
     id<MTLCommandBuffer> last_cb;
     double encode_time, gpu_wait_time;
     BOOL pipeline_set; /* in the open encoder */
@@ -175,6 +187,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     dispatch_source_t shot_timer;
 }
 - (void)complain:(NSString *)what;
+- (id<MTLCommandBuffer>)diagBuffer:(NSString *)scope task:(uint32_t)task channel:(uint32_t)ch stamp:(uint32_t)stamp;
 - (HvObject *)object:(uint32_t)ref task:(uint32_t)task;
 - (void)drawCursor;
 - (BOOL)hasDisplayLayer;
@@ -278,7 +291,13 @@ static void refresh_pages(HvReplay *r, uint32_t task, HvObject *o) {
     o->mapping_in_buffer = NO;
     o->generation++;
     o->guest_copy = nil;
-    if (o->plain_buffer) o->object = buffer_over_mapping(r, o);
+    if (o->plain_buffer) {
+        if (pvg_diag()) {
+            pvg_gpu_retire(&r->diag_history, task, o->diag_ref, 0);
+            o->diag_generation = ++r->diag_generation;
+        }
+        o->object = buffer_over_mapping(r, o);
+    }
     r->remaps++;
 }
 
@@ -468,9 +487,14 @@ static void pvg_log_texture(NSMutableString *log, const char *name, uint32_t ref
                         (unsigned long)c.writeMask);
             }
         }
-        if (state && tag == 0xe && getenv("HV_PVG_TRACE_FILE")) {
+        if (state && tag == 0xe && (pvg_diag() || getenv("HV_PVG_TRACE_FILE"))) {
             MTLRenderPipelineDescriptor *rp = descriptor;
-            objc_setAssociatedObject(state, "hvname", [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled], OBJC_ASSOCIATION_RETAIN);
+            NSString *name = [NSString stringWithFormat:@"%@ / %@ -> fmt %lu blend %d", rp.vertexFunction.name, rp.fragmentFunction.name, (unsigned long)rp.colorAttachments[0].pixelFormat, (int)rp.colorAttachments[0].blendingEnabled];
+            objc_setAssociatedObject(state, "hvname", pvg_diag() ? pvg_short_string(name) : name, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+        if (state && tag == 0x33 && pvg_diag()) {
+            MTLTileRenderPipelineDescriptor *tp = descriptor;
+            objc_setAssociatedObject(state, "hvname", pvg_short_string(tp.tileFunction.name), OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
         return state;
     }
@@ -489,6 +513,10 @@ static void pvg_log_texture(NSMutableString *log, const char *name, uint32_t ref
         if (pvg_diag()) { MTLComputePipelineDescriptor *cp = descriptor; fprintf(stderr, "pvg: compute pipeline start task=%u function=%s\n", task, cp.computeFunction.name.UTF8String ?: "-"); fflush(stderr); }
         id state = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&err];
         if (!state) [self complain:[NSString stringWithFormat:@"compute pipeline: domain=%@ code=%ld details=%@", err.domain, (long)err.code, err]];
+        if (state && pvg_diag()) {
+            MTLComputePipelineDescriptor *cp = descriptor;
+            objc_setAssociatedObject(state, "hvname", pvg_short_string(cp.computeFunction.name), OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
         return state;
     }
     if (tag == 3) { /* sampler: {tag, size, ref, bits, lod min, lod max, ...} */
@@ -881,7 +909,10 @@ static void sync_iosurface(HvObject *s) {
         if (o->follows->mapped) refresh_pages(self, task, o->follows);
         if (o->follows->generation == o->follows_generation) return o;
     }
+    if (o && pvg_diag()) pvg_gpu_retire(&diag_history, task, ref, 0);
     o = [HvObject new];
+    o->diag_ref = ref;
+    if (pvg_diag()) o->diag_generation = ++diag_generation;
     memcpy(o->entry, e, 12);
     objs[@(ref)] = o;
     uint32_t type = e[0] & 0xff, size = e[0] >> 8;
@@ -968,6 +999,18 @@ static BOOL has_guest_pages(HvObject *o) {
         }
 }
 
+/* Diagnostic command buffers retain resources exactly as the normal Metal default does. */
+- (id<MTLCommandBuffer>)diagBuffer:(NSString *)scope task:(uint32_t)task channel:(uint32_t)ch stamp:(uint32_t)stamp {
+    if (!pvg_diag()) return [queue commandBuffer];
+    MTLCommandBufferDescriptor *d = [MTLCommandBufferDescriptor new];
+    d.retainedReferences = YES;
+    d.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    id<MTLCommandBuffer> cb = [queue commandBufferWithDescriptor:d];
+    cb.label = [NSString stringWithFormat:@"%@ task=%u ch=%u stamp=%u serial=%llu", scope, task, ch, stamp, (unsigned long long)++diag_serial];
+    objc_setAssociatedObject(cb, "pvgtask", @(task), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return cb;
+}
+
 /* The guest asks to see what the GPU made: {task, count, refs}. */
 - (void)synchronize:(const uint32_t *)a length:(uint32_t)n {
     if (n < 8) return;
@@ -979,10 +1022,11 @@ static BOOL has_guest_pages(HvObject *o) {
     for (uint32_t i = 0; i < count; i++) {
         HvObject *o = objs[@(a[2 + i])];
         if (!o || !o->guest_backed || !o->host_valid) continue;
-        if (!cb) cb = [queue commandBuffer];
+        if (!cb) cb = [self diagBuffer:@"synchronize" task:task channel:0 stamp:0];
         [self page:o toGuest:YES task:task blit:&blit commandBuffer:cb];
         o->guest_stale = NO;
     }
+    if (blit && pvg_diag()) blit.label = @"synchronize-0";
     [blit endEncoding];
     if (cb) {
         [self commit:cb channel:0 stamp:0 complete:NO];
@@ -1014,6 +1058,42 @@ typedef struct {
 #define U32(off) (*(const uint32_t *)(r.p + (off)))
 #define U16(off) (*(const uint16_t *)(r.p + (off)))
 #define U64(off) ({ uint64_t _v; memcpy(&_v, r.p + (off), 8); _v; })
+
+/* Metadata only; never retain the Metal objects or read buffer contents. */
+- (void)diagRecord:(NSMutableArray *)records dropped:(NSUInteger *)dropped encoder:(id)e tag:(uint32_t)tag rec:(Rec)r task:(uint32_t)task base:(NSUInteger)base {
+    @autoreleasepool {
+    NSString *line = nil;
+    NSString *label = [e label] ?: @"encoder";
+    if ((tag == 116 || tag == 208) && r.size >= 4) {
+        HvObject *o = tasks[@(task)][@(U32(0))];
+        id state = o ? o->object : nil;
+        line = [NSString stringWithFormat:@"%@ pipeline tag=%u ref=%u name=%@", label, tag, U32(0), pvg_short_string(objc_getAssociatedObject(state, "hvname"))];
+    } else if ((tag == 207 || tag == 126 || tag == 111) && r.size >= 12) {
+        line = [NSString stringWithFormat:@"%@ offset tag=%u index=%u offset=%llu", label, tag, U32(0), (unsigned long long)U64(4)];
+    } else if ((tag == 200 || tag == 202) && r.size >= 2 * sizeof(MTLSize)) {
+        MTLSize a, b;
+        memcpy(&a, r.p, sizeof a); memcpy(&b, r.p + sizeof a, sizeof b);
+        line = [NSString stringWithFormat:@"%@ dispatch tag=%u grid=%lu,%lu,%lu group=%lu,%lu,%lu", label, tag, (unsigned long)a.width, (unsigned long)a.height, (unsigned long)a.depth, (unsigned long)b.width, (unsigned long)b.height, (unsigned long)b.depth];
+    } else if ((tag == 203 || tag == 125 || tag == 110 || tag == 157 || tag == 165) && r.size >= 8) {
+        uint32_t index = U32(0), count = U32(4);
+        uint32_t stride = tag == 165 ? 20 : 12;
+        if (count > 31 || r.size < 8 + (uint64_t)count * stride) return;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t ref = U32(8 + i * stride);
+            HvObject *o = tasks[@(task)][@(ref)];
+            id obj = o ? o->object : nil;
+            id<MTLBuffer> buffer = [obj conformsToProtocol:@protocol(MTLBuffer)] ? obj : nil;
+            NSString *entry = [NSString stringWithFormat:@"%@ bind tag=%u index=%u ref=%u offset=%llu length=%llu gpuAddress=0x%llx", label, tag, index + i, ref, (unsigned long long)U64(12 + i * stride), (unsigned long long)buffer.length, (unsigned long long)buffer.gpuAddress];
+            if (records.count >= base + 64) { [records removeObjectAtIndex:base]; ++*dropped; }
+            [records addObject:entry];
+        }
+    }
+    if (line) {
+        if (records.count >= base + 64) { [records removeObjectAtIndex:base]; ++*dropped; }
+        [records addObject:line];
+    }
+    }
+}
 
 - (id<MTLRenderCommandEncoder>)beginPass:(Rec)r task:(uint32_t)task commandBuffer:(id<MTLCommandBuffer>)cb {
     static _Atomic uint64_t pass_id;
@@ -1105,7 +1185,11 @@ typedef struct {
         fflush(stderr);
     }
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
-    if (e && pvg_diag()) { fprintf(stderr, "pvg: pass success task=%u id=%llu\n", task, (unsigned long long)pass); fflush(stderr); }
+    if (e && pvg_diag()) {
+        e.label = [NSString stringWithFormat:@"pass=%llu", (unsigned long long)pass];
+        fprintf(stderr, "pvg: pass success task=%u id=%llu\n", task, (unsigned long long)pass);
+        fflush(stderr);
+    }
     if (!e) {
         NSMutableString *m = [NSMutableString stringWithString:@"no render encoder:"];
         for (int i = 0; i < 8 && pvg_pass_color(r.size, i); i++) {
@@ -1737,11 +1821,17 @@ typedef struct {
         HvObject *ho = [self object:ref task:task];
         uint64_t a = ho && ho->heap_whole ? ho->heap_whole.gpuAddress : 0;
         (void)h;
+        if (pvg_diag() && ho && ho->heap_whole) pvg_gpu_export(&diag_history, task, ref, ho->diag_generation, tag, a, ho->heap_whole.length);
         memcpy(out, &a, 8);
         break;
     }
     case 461: { /* buffer */
-        uint64_t a = [(id<MTLBuffer>)obj gpuAddress];
+        id<MTLBuffer> buffer = obj;
+        uint64_t a = buffer.gpuAddress;
+        if (pvg_diag()) {
+            HvObject *bo = tasks[@(task)][@(ref)];
+            if (bo) pvg_gpu_export(&diag_history, task, ref, bo->diag_generation, tag, a, buffer.length);
+        }
         memcpy(out, &a, 8);
         break;
     }
@@ -1757,17 +1847,74 @@ typedef struct {
     }
 }
 
+static const char *pvg_encoder_state(NSUInteger state) {
+    switch (state) {
+        case MTLCommandEncoderErrorStateUnknown: return "unknown";
+        case MTLCommandEncoderErrorStateCompleted: return "completed";
+        case MTLCommandEncoderErrorStateAffected: return "affected";
+        case MTLCommandEncoderErrorStatePending: return "pending";
+        case MTLCommandEncoderErrorStateFaulted: return "faulted";
+        default: return "other";
+    }
+}
+
 /* One exec: {task, resources, buffers}, {ref, flags} per resource, {offset, length} per buffer. */
 /* Commits without waiting: the next batch can be encoded while the GPU does this one. */
 - (void)commit:(id<MTLCommandBuffer>)cb channel:(uint32_t)ch stamp:(uint32_t)stamp complete:(BOOL)complete {
     static int sync = -1; /* HV_PVG_SYNC: wait for the GPU after every batch */
     if (sync < 0) sync = getenv("HV_PVG_SYNC") != NULL;
     HvPvgLite *l = lite;
+    BOOL diagnostics = pvg_diag();
+    NSMutableArray *snapshot = diagnostics ? [NSMutableArray arrayWithArray:objc_getAssociatedObject(cb, "pvgdiag") ?: @[]] : nil;
+    if (diagnostics) {
+        uint32_t task = [objc_getAssociatedObject(cb, "pvgtask") unsignedIntValue];
+        [snapshot addObject:[NSString stringWithFormat:@"export history task=%u evicted=%llu (retired means logical replacement, not deallocation)", task, (unsigned long long)diag_history.evicted]];
+        for (size_t i = 0; i < diag_history.count; i++) {
+            PvgGpuRange v = diag_history.entries[i];
+            if (v.task != task) continue;
+            [snapshot addObject:[NSString stringWithFormat:@"range task=%u ref=%u gen=%u tag=%u addr=0x%llx len=%llu retired=%d seq=%llu", v.task, v.ref, v.generation, v.tag, (unsigned long long)v.address, (unsigned long long)v.length, v.retired, (unsigned long long)v.sequence]];
+        }
+    }
+    NSArray *frozen = [snapshot copy];
     atomic_fetch_add(&inflight, 1);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         if (done.error) {
             self->failed++;
             fprintf(stderr, "hengevm: pvg-metal: command buffer: %s\n", done.error.localizedDescription.UTF8String);
+            NSError *error = done.error;
+            BOOL ignored = [error.domain isEqualToString:MTLCommandBufferErrorDomain] && error.code == MTLCommandBufferErrorBlacklisted;
+            if (diagnostics && !ignored && atomic_fetch_add(&self->diag_errors, 1) < 4) {
+                flockfile(stderr);
+                fprintf(stderr, "pvg-diag: error label=%s status=%lu domain=%s code=%ld description=%s reason=%s\n", pvg_short_string(done.label).UTF8String ?: "", (unsigned long)done.status, pvg_short_string(error.domain).UTF8String ?: "", (long)error.code, pvg_short_string(error.localizedDescription).UTF8String ?: "", pvg_short_string(error.localizedFailureReason).UTF8String ?: "");
+                id infos = error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
+                if ([infos isKindOfClass:[NSArray class]]) {
+                    NSUInteger count = [infos count], shown = 0;
+                    /* A late fault must not be displaced by 32 completed encoders. */
+                    for (unsigned priority = 0; priority < 4 && shown < 32; priority++) {
+                        for (NSUInteger i = 0; i < count && shown < 32; i++) {
+                            id<MTLCommandBufferEncoderInfo> info = infos[i];
+                            if (![info conformsToProtocol:@protocol(MTLCommandBufferEncoderInfo)]) continue;
+                            MTLCommandEncoderErrorState state = info.errorState;
+                            unsigned rank = state == MTLCommandEncoderErrorStateFaulted ? 0 :
+                                            state == MTLCommandEncoderErrorStateAffected ? 1 :
+                                            state == MTLCommandEncoderErrorStatePending ? 2 : 3;
+                            if (rank != priority) continue;
+                            fprintf(stderr, "pvg-diag: encoder index=%lu label=%s state=%s(%lu)\n", (unsigned long)i, pvg_short_string(info.label).UTF8String ?: "", pvg_encoder_state(state), (unsigned long)state);
+                            NSArray *signposts = info.debugSignposts;
+                            NSUInteger ns = MIN(signposts.count, (NSUInteger)8);
+                            for (NSUInteger j = 0; j < ns; j++) fprintf(stderr, "pvg-diag: signpost %s\n", pvg_short_string(signposts[j]).UTF8String ?: "");
+                            fprintf(stderr, "pvg-diag: signposts omitted=%lu\n", (unsigned long)(signposts.count - ns));
+                            shown++;
+                        }
+                    }
+                    fprintf(stderr, "pvg-diag: encoders omitted=%lu\n", (unsigned long)(count - shown));
+                } else {
+                    fprintf(stderr, "pvg-diag: encoder execution info unavailable\n");
+                }
+                for (NSString *line in frozen) fprintf(stderr, "pvg-diag: %s\n", line.UTF8String);
+                fflush(stderr);
+                funlockfile(stderr);
+            }
         }
         if (complete) hv_pvg_lite_complete(l, ch, stamp);
         atomic_fetch_sub(&self->inflight, 1);
@@ -1783,7 +1930,7 @@ typedef struct {
         hv_pvg_lite_complete(lite, ch, stamp);
         return;
     }
-    [self commit:[queue commandBuffer] channel:ch stamp:stamp complete:YES];
+    [self commit:[self diagBuffer:@"finish" task:0 channel:ch stamp:stamp] channel:ch stamp:stamp complete:YES];
 }
 
 /* Returns YES if the GPU's completion gives the stamp back. */
@@ -1801,13 +1948,20 @@ typedef struct {
     tracing = trace_file && access(trace_file, F_OK) == 0;
     if (tracing) fprintf(stderr, "trace: exec task %u, %u resources, %u buffers\n", task, nres, nbuf);
     double t_begin = now_seconds();
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLCommandBuffer> cb = [self diagBuffer:@"exec" task:task channel:ch stamp:stamp];
+    NSMutableArray *diagRecords = pvg_diag() ? [NSMutableArray new] : nil;
+    NSUInteger diagDropped = 0, encoderIndex = 0;
     id<MTLBlitCommandEncoder> blit = nil;
     BOOL sync_after = NO;
     for (uint32_t i = 0; i < nres; i++) {
         HvObject *o = [self object:res[i * 2] task:task];
+        if (o && o->mapped) refresh_pages(self, task, o);
+        if (diagRecords && i < 32) {
+            id obj = o ? o->object : nil;
+            id<MTLBuffer> buffer = [obj conformsToProtocol:@protocol(MTLBuffer)] ? obj : (o ? o->heap_whole : nil);
+            [diagRecords addObject:[NSString stringWithFormat:@"resource ref=%u flags=%x type=%u generation=%u length=%llu bufferAddress=0x%llx bufferLength=%llu", res[i * 2], res[i * 2 + 1], o ? o->entry[0] & 255 : 0, o ? o->diag_generation : 0, (unsigned long long)(o ? o->length : 0), (unsigned long long)buffer.gpuAddress, (unsigned long long)buffer.length]];
+        }
         if (!o) continue;
-        if (o->mapped) refresh_pages(self, task, o);
         if (o->surface) sync_iosurface(o->surface);
         if (getenv("HV_PVG_TALLY") && (o->entry[0] & 0xff) == OBJ_MAPPED_TEXTURE) {
             static uint32_t seen[256];
@@ -1824,7 +1978,10 @@ typedef struct {
         }
         if (res[i * 2 + 1] & 4) sync_after = YES;
     }
+    if (blit && diagRecords) blit.label = [NSString stringWithFormat:@"upload-%lu", (unsigned long)encoderIndex++];
+    if (diagRecords && nres > 32) [diagRecords addObject:[NSString stringWithFormat:@"resources omitted=%u", nres - 32]];
     [blit endEncoding];
+    NSUInteger diagBase = diagRecords.count;
     /* Bit 1: this exec writes it, so the guest's copy is out of date from here on. Never
        upload that over what the GPU drew: mostly zeros, which show as black boxes. */
     for (uint32_t i = 0; i < nres; i++)
@@ -1867,6 +2024,7 @@ typedef struct {
         }
         if (!e && type == 1) e = [cb computeCommandEncoder], pipeline_set = NO;
         if (!e && type == 2) e = [cb blitCommandEncoder];
+        if (e && diagRecords && ![e label]) [e setLabel:[NSString stringWithFormat:@"%@-%lu", type == 1 ? @"compute" : @"blit", (unsigned long)encoderIndex++]];
         etype = type;
         @try {
             while (p + 8 <= end) {
@@ -1884,10 +2042,12 @@ typedef struct {
                     if (e) [e endEncoding];
                     e = [self beginPass:r task:task commandBuffer:cb];
                     pipeline_set = NO, tess_factors = NO;
+                    if (e && diagRecords) [e setLabel:[NSString stringWithFormat:@"render-%lu %@", (unsigned long)encoderIndex++, [e label] ?: @""]];
                 } else if (e) {
                     if (etype == 0) [self render:e tag:tag rec:r task:task];
                     else if (etype == 1) [self compute:e tag:tag rec:r task:task];
                     else [self blit:e tag:tag rec:r task:task];
+                    if (diagRecords) [self diagRecord:diagRecords dropped:&diagDropped encoder:e tag:tag rec:r task:task base:diagBase];
                 }
                 p += size;
             }
@@ -1907,7 +2067,12 @@ typedef struct {
             [self page:o toGuest:YES task:task blit:&back commandBuffer:cb];
             o->guest_stale = NO;
         }
+        if (back && diagRecords) back.label = [NSString stringWithFormat:@"download-%lu", (unsigned long)encoderIndex++];
         [back endEncoding];
+    }
+    if (diagRecords) {
+        [diagRecords addObject:[NSString stringWithFormat:@"binding/dispatch records omitted=%lu", (unsigned long)diagDropped]];
+        objc_setAssociatedObject(cb, "pvgdiag", [diagRecords copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     double t1 = now_seconds();
     [self commit:cb channel:ch stamp:stamp complete:YES];
@@ -2369,6 +2534,14 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) return NULL;
+        if (pvg_diag()) {
+            MTLArgumentBuffersTier tier = dev.argumentBuffersSupport;
+            fprintf(stderr, "pvg-diag: device %.200s argument buffers %s (raw %lu) families Apple5=%d Apple6=%d Apple7=%d Mac2=%d Metal3=%d; replay only (presenter/readback excluded)\n",
+                    dev.name.UTF8String, tier == MTLArgumentBuffersTier1 ? "tier1" : tier == MTLArgumentBuffersTier2 ? "tier2" : "unknown", (unsigned long)tier,
+                    [dev supportsFamily:MTLGPUFamilyApple5], [dev supportsFamily:MTLGPUFamilyApple6], [dev supportsFamily:MTLGPUFamilyApple7], [dev supportsFamily:MTLGPUFamilyMac2], [dev supportsFamily:MTLGPUFamilyMetal3]);
+            if (tier == MTLArgumentBuffersTier1) fprintf(stderr, "pvg-diag: tier1 direct raw GPU address/resource ID argument encoding support is not established; rendering unchanged\n");
+            fflush(stderr);
+        }
         if (![dev respondsToSelector:@selector(newRenderPipelineDescriptorWithSerializedData:deserializationContext:)]) {
             fprintf(stderr, "hengevm: pvg-metal: this Metal cannot read serialized pipelines; no drawing\n");
             return NULL;
@@ -2420,6 +2593,7 @@ void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t ch, uint32_t *
                     gpu_completes = [r exec:args length:n channel:ch stamp:cmd[2]];
                 } else if ((op == 0x25 || op == 0x28) && n >= 8) { /* {task, ref} or {task, tag, size, ref} */
                     uint32_t ref = op == 0x25 ? args[1] : (n >= 16 ? args[3] : 0);
+                    if (pvg_diag()) pvg_gpu_retire(&r->diag_history, args[0], ref, 0);
                     [r->tasks[@(args[0])] removeObjectForKey:@(ref)];
                 } else if (op == 0x35 || op == 0x3e) {
                     [r synchronize:args length:n];
@@ -2429,6 +2603,7 @@ void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t ch, uint32_t *
                     /* "May be thrown away": Apple's host only marks it purgeable, and the bytes stay
                        until the system needs the memory. Here they just stay. */
                 } else if (op == 0x20 && n >= 4) {
+                    if (pvg_diag()) pvg_gpu_retire(&r->diag_history, args[0] >> 1, 0, 1);
                     [r->tasks removeObjectForKey:@(args[0] >> 1)];
                 } else {
                     hv_pvg_lite_command(lite, cmd, len);
